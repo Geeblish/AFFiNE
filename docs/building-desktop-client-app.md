@@ -57,10 +57,20 @@ On Windows (powershell)
 
 ```powershell
 $env:BUILD_TYPE="canary"
-$env:DISTRIBUTION=desktop
-$env:SKIP_WEB_BUILD=1
-yarn build
+$env:DISTRIBUTION="desktop"
+$env:NODE_OPTIONS="--max-old-space-size=14384"
+Remove-Item Env:SKIP_WEB_BUILD -ErrorAction SilentlyContinue
+yarn affine @affine/electron generate-assets
+
+# Both files must exist before continuing to the packaging install.
+Test-Path packages/frontend/apps/electron/resources/web-static/index.html
+Test-Path packages/frontend/apps/electron/resources/web-static/shell.html
 ```
+
+Do not set `SKIP_WEB_BUILD` during this step. It tells
+`generate-assets.ts` to reuse an existing renderer build, so using it before
+`resources/web-static` has been populated produces an Electron window that
+cannot load `assets://./` or `assets://./shell.html`.
 
 ### 2. Re-config yarn, clean up the node_modules and reinstall the dependencies
 
@@ -83,7 +93,7 @@ yarn install
 On Windows (powershell)
 
 ```powershell
-dir -Path . -Filter node_modules -recurse | foreach {echo $_.fullname; rm -r -Force $_.fullname}
+yarn affine clean --node-modules
 yarn install
 ```
 
@@ -103,12 +113,23 @@ Making the windows installer is a bit different. Right now we provide two instal
 
 ```powershell
 $env:BUILD_TYPE="canary"
+$env:DISTRIBUTION="desktop"
 $env:SKIP_WEB_BUILD=1
 $env:HOIST_NODE_MODULES=1
-yarn affine @affine/electron package
+$env:NODE_OPTIONS="--max-old-space-size=14384"
+
+# Close a previously launched canary build before replacing its output files.
+Get-Process -Name "AFFiNE-canary" -ErrorAction SilentlyContinue | Stop-Process
+
+yarn affine @affine/electron package --platform=win32 --arch=x64
 yarn affine @affine/electron make-squirrel
 yarn affine @affine/electron make-nsis
 ```
+
+`SKIP_WEB_BUILD=1` is correct here because step 1 already generated the
+renderer assets. `HOIST_NODE_MODULES=1` preserves the workspace-local
+`node_modules` produced in step 2 so runtime dependencies such as
+`electron-updater` are included in the package.
 
 Once the build is complete, you can find the paths to the binaries in the terminal output.
 
@@ -117,9 +138,35 @@ Finished 2 bundles at:
   › Artifacts available at: <affine-repo>/packages/frontend/apps/electron/out/canary/make
 ```
 
+The unpacked Windows executable is written below `out/canary`, for example:
+
+```text
+packages/frontend/apps/electron/out/canary/AFFiNE-canary-win32-x64/AFFiNE-canary.exe
+```
+
+The installer artifacts are written below `out/canary/make`.
+
+### Restore the development dependency layout
+
+Workspace-local hoisting is needed for packaging but can prevent development
+tools such as `swc-loader` from resolving from other workspaces. Restore the
+repository defaults before running `yarn dev` again:
+
+```powershell
+yarn config set nmMode hardlinks-local
+yarn config unset nmHoistingLimits
+yarn affine clean --node-modules
+yarn install
+```
+
+You do not need to create `dist`, `resources/web-static`, or `out` manually;
+the build and packaging commands create them.
+
 ## CI
 
-Please refer to `.github/workflows/release-desktop-app.yml` for the CI workflow. It will:
+Please refer to `.github/workflows/release-desktop.yml` and
+`.github/workflows/release-desktop-platform.yml` for the CI workflow. They
+will:
 
 - build the app for all supported platforms
 - upload the artifacts to GitHub Actions
